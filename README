@@ -1,0 +1,17 @@
+To build and install:
+
+make
+sudo make install
+sudo modprobe pmbus	# Generic PMBus chip support
+sudo modprobe max16064	# Chip specific PMBus support, for explicitly supported chips
+
+To enable hwmon support for a specific chip:
+
+cd /sys/class/i2c-adapter/i2c-1	# The PMBus chip is connected to I2C bus #1
+echo pmbus 0x4e > new_device	# The PMBus chip is on i2c address 0x4e
+echo max16064 0x7 > new_device	# A max16064 is on i2c address 0x07 (on i2c bus #1)
+
+If your chip is not explicitly supported, load the "pmbus" driver. It should auto-detect 
+most of the chip capabilities.
+
+Please send feedback and problem reports to linux@roeck-us.net.
