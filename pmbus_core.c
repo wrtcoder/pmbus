@@ -1692,10 +1692,14 @@ static void _pmbus_do_alert(struct i2c_client *client, bool clear)
 
 	/*
 	 * Update sensor data only if this is an alert callback, or if the data
-	 * is more than 200ms old. Otherwise we rather skip the update, since
+	 * is older than 200 ms. Otherwise we rather skip the update, since
 	 * clearing faults (which is done as part of the update and is needed
 	 * for handling alerts) may temporarily clear alarm status bits even if
 	 * an alarm is still active.
+	 * Selecting 200 ms is a more or less arbitrary value. The value needs
+	 * to be be longer than the slowest imaginable status update cycle on
+	 * any PMBus device, yet small enough to capture state changes
+	 * reasonably fast.
 	 */
 	if (clear || !data->valid
 	    || time_after(jiffies, data->last_updated + HZ/5)) {
@@ -1711,7 +1715,9 @@ static void _pmbus_do_alert(struct i2c_client *client, bool clear)
 		err = pmbus_get_boolean(data, attr->index, &val);
 		if (!err) {
 			if (val != bool->previous) {
-				dev_info(&client->dev, "%s: %d->%d\n", bool->name, bool->previous, val);
+				// FIXME - remove for submission
+				dev_info(&client->dev, "%s: %d->%d\n",
+					 bool->name, bool->previous, val);
 				bool->previous = val;
 				sysfs_notify(&client->dev.kobj, NULL,
 					     bool->name);
