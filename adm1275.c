@@ -385,7 +385,9 @@ static struct i2c_driver adm1275_driver = {
 		   },
 	.probe = adm1275_probe,
 	.remove = adm1275_remove,
+#if defined(CONFIG_I2C_SMBUS) || defined(CONFIG_I2C_PMBUS_MODULE)
 	.alert = pmbus_do_alert,
+#endif
 	.id_table = adm1275_id,
 };
 

@@ -824,6 +824,10 @@ static ssize_t pmbus_show_label(struct device *dev,
 			data->labels[attr->index].label);
 }
 
+#ifndef sysfs_attr_init
+#define sysfs_attr_init(attr) do {} while(0)
+#endif
+
 #define PMBUS_ADD_ATTR(data, _name, _idx, _mode, _type, _show, _set)	\
 do {									\
 	struct sensor_device_attribute *a				\

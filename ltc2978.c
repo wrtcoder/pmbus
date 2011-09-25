@@ -393,7 +393,9 @@ static struct i2c_driver ltc2978_driver = {
 		   },
 	.probe = ltc2978_probe,
 	.remove = ltc2978_remove,
+#if defined(CONFIG_I2C_SMBUS) || defined(CONFIG_I2C_PMBUS_MODULE)
 	.alert = pmbus_do_alert,
+#endif
 	.id_table = ltc2978_id,
 };
 
