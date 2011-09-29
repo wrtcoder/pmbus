@@ -70,16 +70,11 @@ struct ltc2978_data {
 
 static inline int lin11_to_val(int data)
 {
-	s16 e = (data >> 11) & 0x1f;
-	s32 m = data & 0x7ff;
+	s16 e = ((s16)data) >> 11;
+	s32 m = (((s16)(data << 5)) >> 5);
 
-	/* sign-extend mantissa and exponent */
-	if (e > 0x0f)
-		e |= 0xffe0;
-	if (m > 0x3ff)
-		m |= 0xfffff800;
 	/*
-	 * mantissa is 10 bit + sign, exponent is up to 15 bit.
+	 * mantissa is 10 bit + sign, exponent adds up to 15 bit.
 	 * Add 6 bit to exponent for maximum accuracy (10 + 15 + 6 = 31).
 	 */
 	e += 6;
