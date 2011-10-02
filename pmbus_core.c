@@ -456,7 +456,7 @@ static long pmbus_reg2data_linear(struct pmbus_data *data,
 		mantissa = (u16) sensor->data;
 	} else {				/* LINEAR11 */
 		exponent = ((s16)sensor->data) >> 11;
-		mantissa = (((s16)(sensor->data & 0x7ff)) << 5) >> 5;
+		mantissa = ((s16)((sensor->data & 0x7ff) << 5)) >> 5;
 	}
 
 	val = mantissa;
