@@ -28,7 +28,7 @@
 #include <linux/delay.h>
 #include "pmbus.h"
 
-enum chips { zl2004, zl2006, zl2008, zl2105, zl2106, zl6100, zl6105 };
+enum chips { zl2004, zl2005, zl2006, zl2008, zl2105, zl2106, zl6100, zl6105 };
 
 struct zl6100_data {
 	int id;
@@ -64,6 +64,19 @@ static int zl6100_read_word_data(struct i2c_client *client, int page, int reg)
 
 	if (page || reg >= PMBUS_VIRT_BASE)
 		return -ENXIO;
+
+	if (data->id == zl2005) {
+		/*
+		 * Limit register detection is not reliable on ZL2005.
+		 * Make sure registers are not erroneously detected.
+		 */
+		switch (reg) {
+		case PMBUS_VOUT_OV_WARN_LIMIT:
+		case PMBUS_VOUT_UV_WARN_LIMIT:
+		case PMBUS_IOUT_OC_WARN_LIMIT:
+			return -ENXIO;
+		}
+	}
 
 	zl6100_wait(data);
 	ret = pmbus_read_word_data(client, page, reg);
@@ -122,7 +135,10 @@ static int zl6100_write_byte(struct i2c_client *client, int page, u8 value)
 }
 
 static const struct i2c_device_id zl6100_id[] = {
+	{"bmr451", zl2005},
+	{"bmr462", zl2008},
 	{"zl2004", zl2004},
+	{"zl2005", zl2005},
 	{"zl2006", zl2006},
 	{"zl2008", zl2008},
 	{"zl2105", zl2105},
@@ -178,13 +194,14 @@ static int zl6100_probe(struct i2c_client *client,
 
 	/*
 	 * ZL2008, ZL2105, and ZL6100 are known to require a wait time
-	 * between I2C accesses. ZL2004 and ZL6105 are known to be safe.
+	 * between I2C accesses. ZL2004, ZL2005, and ZL6105 are known to be
+	 * safe. Other chips have not yet been tested.
 	 *
 	 * Only clear the wait time for chips known to be safe. The wait time
 	 * can be cleared later for additional chips if tests show that it
 	 * is not needed (in other words, better be safe than sorry).
 	 */
-	if (data->id == zl2004 || data->id == zl6105)
+	if (data->id == zl2004 || data->id == zl2005 || data->id == zl6105)
 		delay = 0;
 
 	/*
