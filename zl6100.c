@@ -138,8 +138,10 @@ static int zl6100_write_byte(struct i2c_client *client, int page, u8 value)
 }
 
 static const struct i2c_device_id zl6100_id[] = {
+	{"bmr450", zl2005},
 	{"bmr451", zl2005},
 	{"bmr462", zl2008},
+	{"bmr463", zl2008},
 	{"bmr464", zl2008},
 	{"zl2004", zl2004},
 	{"zl2005", zl2005},
@@ -197,26 +199,23 @@ static int zl6100_probe(struct i2c_client *client,
 	data->id = mid->driver_data;
 
 	/*
-	 * ZL2008, ZL2105, and ZL6100 are known to require a wait time
-	 * between I2C accesses. ZL2004, ZL2005, and ZL6105 are known to be
-	 * safe. Other chips have not yet been tested.
+	 * ZL2005, ZL2008, ZL2105, and ZL6100 are known to require a wait time
+	 * between I2C accesses. ZL2004 and ZL6105 are known to be safe.
+	 * Other chips have not yet been tested.
 	 *
 	 * Only clear the wait time for chips known to be safe. The wait time
 	 * can be cleared later for additional chips if tests show that it
 	 * is not needed (in other words, better be safe than sorry).
 	 */
-	if (data->id == zl2004 || data->id == zl2005 || data->id == zl6105)
+	if (data->id == zl2004 || data->id == zl6105)
 		delay = 0;
 
 	/*
 	 * Since there was a direct I2C device access above, wait before
 	 * accessing the chip again.
-	 * Set the timestamp, wait, then set it again. This should provide
-	 * enough buffer time to be safe.
 	 */
 	data->access = ktime_get();
 	zl6100_wait(data);
-	data->access = ktime_get();
 
 	info = &data->info;
 
@@ -234,7 +233,6 @@ static int zl6100_probe(struct i2c_client *client,
 
 	data->access = ktime_get();
 	zl6100_wait(data);
-	data->access = ktime_get();
 
 	info->read_word_data = zl6100_read_word_data;
 	info->read_byte_data = zl6100_read_byte_data;
