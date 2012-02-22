@@ -1885,7 +1885,7 @@ out_hwmon_device_register:
 }
 EXPORT_SYMBOL_GPL(pmbus_do_probe);
 
-void pmbus_do_remove(struct i2c_client *client)
+int pmbus_do_remove(struct i2c_client *client)
 {
 	struct pmbus_data *data = i2c_get_clientdata(client);
 
@@ -1900,6 +1900,7 @@ void pmbus_do_remove(struct i2c_client *client)
 
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&client->dev.kobj, &data->group);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(pmbus_do_remove);
 
