@@ -11,6 +11,11 @@ Supported chips:
     Prefixes: 'max34441'
     Addresses scanned: -
     Datasheet: http://datasheets.maxim-ic.com/en/ds/MAX34441.pdf
+  * Maxim MAX34446
+    PMBus Power-Supply Data Logger
+    Prefixes: 'max34446'
+    Addresses scanned: -
+    Datasheet: http://datasheets.maxim-ic.com/en/ds/MAX34446.pdf
 
 Author: Guenter Roeck <guenter.roeck@ericsson.com>
 
@@ -19,8 +24,8 @@ Description
 -----------
 
 This driver supports hardware montoring for Maxim MAX34440 PMBus 6-Channel
-Power-Supply Manager and MAX34441 PMBus 5-Channel Power-Supply Manager
-and Intelligent Fan Controller.
+Power-Supply Manager, MAX34441 PMBus 5-Channel Power-Supply Manager
+and Intelligent Fan Controller, and MAX34446 PMBus Power-Supply Data Logger.
 
 The driver is a client driver to the core PMBus driver. Please see
 Documentation/hwmon/pmbus for details on PMBus client drivers.
