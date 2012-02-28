@@ -28,7 +28,8 @@
 #include <linux/delay.h>
 #include "pmbus.h"
 
-enum chips { zl2004, zl2005, zl2006, zl2008, zl2105, zl2106, zl6100, zl6105 };
+enum chips { zl2004, zl2005, zl2006, zl2008, zl2105, zl2106, zl6100, zl6105,
+	     zl9101m, zl9117m };
 
 struct zl6100_data {
 	int id;
@@ -151,6 +152,8 @@ static const struct i2c_device_id zl6100_id[] = {
 	{"zl2106", zl2106},
 	{"zl6100", zl6100},
 	{"zl6105", zl6105},
+	{"zl9101m", zl9101m},
+	{"zl9117m", zl9117m},
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, zl6100_id);
