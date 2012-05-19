@@ -332,6 +332,7 @@ struct pmbus_driver_info {
 	int R[PSC_NUM_CLASSES];	/* exponent */
 
 	u32 func[PMBUS_PAGES];	/* Functionality, per page */
+	u8 status_register;	/* Set if not PMBUS_STATUS_BYTE */
 	/*
 	 * The following functions map manufacturing specific register values
 	 * to PMBus standard register values. Specify only if mapping is
