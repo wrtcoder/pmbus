@@ -2,6 +2,7 @@
  * Hardware monitoring driver for PMBus devices
  *
  * Copyright (c) 2010, 2011 Ericsson AB.
+ * Copyright (c) 2012 Guenter Roeck
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,16 +27,14 @@
 #include <linux/i2c.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
-#include <linux/delay.h>
-#include <linux/time.h>
-#include <linux/kthread.h>
+#include <linux/jiffies.h>
 #include <linux/i2c/pmbus.h>
 #include "pmbus.h"
 
 /*
  * Constants needed to determine number of sensors, booleans, and labels.
  */
-#define PMBUS_MAX_INPUT_SENSORS		22	/* 10*volt, 7*curr, 5*power */
+#define PMBUS_MAX_INPUT_SENSORS		27	/* 15*volt, 7*curr, 5*power */
 #define PMBUS_VOUT_SENSORS_PER_PAGE	9	/* input, min, max, lcrit,
 						   crit, lowest, highest, avg,
 						   reset */
@@ -51,20 +50,24 @@
 						 * reset
 						 */
 
-#define PMBUS_MAX_INPUT_BOOLEANS	7	/* v: min_alarm, max_alarm,
-						   lcrit_alarm, crit_alarm;
-						   c: alarm, crit_alarm;
-						   p: crit_alarm */
+#define PMBUS_MAX_INPUT_BOOLEANS	11	/* v: min_alarm, max_alarm,
+						 * lcrit_alarm, crit_alarm;
+						 * vmon: min_alarm, max_alarm,
+						 * lcrit_alarm, crit_alarm;
+						 * c: alarm, crit_alarm;
+						 * p: crit_alarm
+						 */
 #define PMBUS_VOUT_BOOLEANS_PER_PAGE	4	/* min_alarm, max_alarm,
 						   lcrit_alarm, crit_alarm */
 #define PMBUS_IOUT_BOOLEANS_PER_PAGE	3	/* alarm, lcrit_alarm,
 						   crit_alarm */
-#define PMBUS_POUT_BOOLEANS_PER_PAGE	2	/* alarm, crit_alarm */
+#define PMBUS_POUT_BOOLEANS_PER_PAGE	3	/* cap_alarm, alarm, crit_alarm
+						 */
 #define PMBUS_MAX_BOOLEANS_PER_FAN	2	/* alarm, fault */
 #define PMBUS_MAX_BOOLEANS_PER_TEMP	4	/* min_alarm, max_alarm,
 						   lcrit_alarm, crit_alarm */
 
-#define PMBUS_MAX_INPUT_LABELS		4	/* vin, vcap, iin, pin */
+#define PMBUS_MAX_INPUT_LABELS		5	/* vin, vcap, vmon, iin, pin */
 
 /*
  * status, status_vout, status_iout, status_fans, status_fan34, and status_temp
@@ -81,7 +84,8 @@
 #define PB_STATUS_FAN_BASE	(PB_STATUS_IOUT_BASE + PMBUS_PAGES)
 #define PB_STATUS_FAN34_BASE	(PB_STATUS_FAN_BASE + PMBUS_PAGES)
 #define PB_STATUS_INPUT_BASE	(PB_STATUS_FAN34_BASE + PMBUS_PAGES)
-#define PB_STATUS_TEMP_BASE	(PB_STATUS_INPUT_BASE + 1)
+#define PB_STATUS_VMON_BASE	(PB_STATUS_INPUT_BASE + 1)
+#define PB_STATUS_TEMP_BASE	(PB_STATUS_VMON_BASE + 1)
 
 #define PMBUS_NAME_SIZE		24
 
@@ -98,11 +102,8 @@ struct pmbus_sensor {
 
 struct pmbus_boolean {
 	char name[PMBUS_NAME_SIZE];	/* sysfs boolean name */
-	int previous;			/* previously reported value */
 	struct sensor_device_attribute attribute;
 };
-
-#define to_pmbus_boolean(a)	container_of(a, struct pmbus_boolean, attribute)
 
 struct pmbus_label {
 	char name[PMBUS_NAME_SIZE];	/* sysfs label name */
@@ -154,14 +155,9 @@ struct pmbus_data {
 	 * so we keep them all together.
 	 */
 	u8 status[PB_NUM_STATUS_REG];
+	u8 status_register;
 
 	u8 currpage;
-
-	u8 status_register;
-	bool alarm;			/* true if there are active alarms */
-	struct task_struct *alert_thread;
-	struct completion alert_thread_stop;
-	struct mutex alert_lock;
 };
 
 int pmbus_set_page(struct i2c_client *client, u8 page)
@@ -428,6 +424,11 @@ static struct pmbus_data *pmbus_update_device(struct device *dev)
 			  = _pmbus_read_byte_data(client, 0,
 						  PMBUS_STATUS_INPUT);
 
+		if (info->func[0] & PMBUS_HAVE_STATUS_VMON)
+			data->status[PB_STATUS_VMON_BASE]
+			  = _pmbus_read_byte_data(client, 0,
+						  PMBUS_VIRT_STATUS_VMON);
+
 		for (i = 0; i < data->num_sensors; i++) {
 			struct pmbus_sensor *sensor = &data->sensors[i];
 
@@ -668,7 +669,7 @@ static u16 pmbus_data2reg_direct(struct pmbus_data *data,
 static u16 pmbus_data2reg_vid(struct pmbus_data *data,
 			      enum pmbus_sensor_classes class, long val)
 {
-	val = SENSORS_LIMIT(val, 500, 1600);
+	val = clamp_val(val, 500, 1600);
 
 	return 2 + DIV_ROUND_CLOSEST((1600 - val) * 100, 625);
 }
@@ -721,13 +722,13 @@ static u16 pmbus_data2reg(struct pmbus_data *data,
  * If a negative value is stored in any of the referenced registers, this value
  * reflects an error code which will be returned.
  */
-static int pmbus_get_boolean(struct pmbus_data *data, int index, int *val)
+static int pmbus_get_boolean(struct pmbus_data *data, int index)
 {
 	u8 s1 = (index >> 24) & 0xff;
 	u8 s2 = (index >> 16) & 0xff;
 	u8 reg = (index >> 8) & 0xff;
 	u8 mask = index & 0xff;
-	int status;
+	int ret, status;
 	u8 regval;
 
 	status = data->status[reg];
@@ -736,7 +737,7 @@ static int pmbus_get_boolean(struct pmbus_data *data, int index, int *val)
 
 	regval = status & mask;
 	if (!s1 && !s2)
-		*val = !!regval;
+		ret = !!regval;
 	else {
 		long v1, v2;
 		struct pmbus_sensor *sensor1, *sensor2;
@@ -750,9 +751,9 @@ static int pmbus_get_boolean(struct pmbus_data *data, int index, int *val)
 
 		v1 = pmbus_reg2data(data, sensor1);
 		v2 = pmbus_reg2data(data, sensor2);
-		*val = !!(regval && v1 >= v2);
+		ret = !!(regval && v1 >= v2);
 	}
-	return 0;
+	return ret;
 }
 
 static ssize_t pmbus_show_boolean(struct device *dev,
@@ -760,15 +761,11 @@ static ssize_t pmbus_show_boolean(struct device *dev,
 {
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
 	struct pmbus_data *data = pmbus_update_device(dev);
-	struct pmbus_boolean *bool;
 	int val;
-	int err;
 
-	err = pmbus_get_boolean(data, attr->index, &val);
-	if (err)
-		return err;
-	bool = to_pmbus_boolean(attr);
-	bool->previous = val;
+	val = pmbus_get_boolean(data, attr->index);
+	if (val < 0)
+		return val;
 	return snprintf(buf, PAGE_SIZE, "%d\n", val);
 }
 
@@ -799,7 +796,7 @@ static ssize_t pmbus_set_sensor(struct device *dev,
 	int ret;
 	u16 regval;
 
-	if (strict_strtol(buf, 10, &val) < 0)
+	if (kstrtol(buf, 10, &val) < 0)
 		return -EINVAL;
 
 	mutex_lock(&data->update_lock);
@@ -823,10 +820,6 @@ static ssize_t pmbus_show_label(struct device *dev,
 	return snprintf(buf, PAGE_SIZE, "%s\n",
 			data->labels[attr->index].label);
 }
-
-#ifndef sysfs_attr_init
-#define sysfs_attr_init(attr) do {} while(0)
-#endif
 
 #define PMBUS_ADD_ATTR(data, _name, _idx, _mode, _type, _show, _set)	\
 do {									\
@@ -1007,7 +1000,7 @@ struct pmbus_limit_attr {
  * description includes a reference to the associated limit attributes.
  */
 struct pmbus_sensor_attr {
-	u8 reg;				/* sensor register */
+	u16 reg;			/* sensor register */
 	enum pmbus_sensor_classes class;/* sensor class */
 	const char *label;		/* sensor label */
 	bool paged;			/* true if paged sensor */
@@ -1160,6 +1153,30 @@ static const struct pmbus_limit_attr vin_limit_attrs[] = {
 	},
 };
 
+static const struct pmbus_limit_attr vmon_limit_attrs[] = {
+	{
+		.reg = PMBUS_VIRT_VMON_UV_WARN_LIMIT,
+		.attr = "min",
+		.alarm = "min_alarm",
+		.sbit = PB_VOLTAGE_UV_WARNING,
+	}, {
+		.reg = PMBUS_VIRT_VMON_UV_FAULT_LIMIT,
+		.attr = "lcrit",
+		.alarm = "lcrit_alarm",
+		.sbit = PB_VOLTAGE_UV_FAULT,
+	}, {
+		.reg = PMBUS_VIRT_VMON_OV_WARN_LIMIT,
+		.attr = "max",
+		.alarm = "max_alarm",
+		.sbit = PB_VOLTAGE_OV_WARNING,
+	}, {
+		.reg = PMBUS_VIRT_VMON_OV_FAULT_LIMIT,
+		.attr = "crit",
+		.alarm = "crit_alarm",
+		.sbit = PB_VOLTAGE_OV_FAULT,
+	}
+};
+
 static const struct pmbus_limit_attr vout_limit_attrs[] = {
 	{
 		.reg = PMBUS_VOUT_UV_WARN_LIMIT,
@@ -1210,6 +1227,15 @@ static const struct pmbus_sensor_attr voltage_attributes[] = {
 		.gbit = PB_STATUS_VIN_UV,
 		.limit = vin_limit_attrs,
 		.nlimit = ARRAY_SIZE(vin_limit_attrs),
+	}, {
+		.reg = PMBUS_VIRT_READ_VMON,
+		.class = PSC_VOLTAGE_IN,
+		.label = "vmon",
+		.func = PMBUS_HAVE_VMON,
+		.sfunc = PMBUS_HAVE_STATUS_VMON,
+		.sbase = PB_STATUS_VMON_BASE,
+		.limit = vmon_limit_attrs,
+		.nlimit = ARRAY_SIZE(vmon_limit_attrs),
 	}, {
 		.reg = PMBUS_READ_VCAP,
 		.class = PSC_VOLTAGE_IN,
@@ -1698,134 +1724,27 @@ static int pmbus_identify_common(struct i2c_client *client,
 	return 0;
 }
 
-static int pmbus_alert_thread(void *p);
-
-static void _pmbus_do_alert(struct i2c_client *client, bool clear)
+static int pmbus_init_common(struct i2c_client *client, struct pmbus_data *data,
+			     struct pmbus_driver_info *info)
 {
-	struct pmbus_data *data = i2c_get_clientdata(client);
-	const struct pmbus_driver_info *info = data->info;
-	int i;
-	bool update = false;
-	bool alarm = false;
-
-	/*
-	 * Update sensor data only if this is an alert callback, or if the data
-	 * is older than 200 ms. Otherwise we rather skip the update, since
-	 * clearing faults (which is done as part of the update and is needed
-	 * for handling alerts) may temporarily clear alarm status bits even if
-	 * an alarm is still active.
-	 * Selecting 200 ms is a more or less arbitrary value. The value needs
-	 * to be be longer than the slowest imaginable status update cycle on
-	 * any PMBus device, yet small enough to capture state changes
-	 * reasonably fast.
-	 */
-	if (clear || !data->valid
-	    || time_after(jiffies, data->last_updated + HZ/5)) {
-		data->valid = 0;
-		pmbus_update_device(&client->dev);
-	}
-
-	for (i = 0; i<data->num_booleans; i++) {
-		struct pmbus_boolean *bool = &data->booleans[i];
-		struct sensor_device_attribute *attr = &bool->attribute;
-		int err, val;
-
-		err = pmbus_get_boolean(data, attr->index, &val);
-		if (!err) {
-			if (val != bool->previous) {
-				// FIXME - remove for submission
-				dev_info(&client->dev, "%s: %d->%d\n",
-					 bool->name, bool->previous, val);
-				bool->previous = val;
-				sysfs_notify(&client->dev.kobj, NULL,
-					     bool->name);
-				update = true;
-			}
-			alarm = alarm || val;
-		}
-	}
-	if (update)
-		kobject_uevent(&client->dev.kobj, KOBJ_CHANGE);
-	if (data->alarm != alarm && info->alert_handler)
-		info->alert_handler(client, alarm);
-	data->alarm = alarm;
-	if (alarm && data->alert_thread == NULL) {
-		init_completion(&data->alert_thread_stop);
-		data->alert_thread = kthread_run(pmbus_alert_thread, client,
-						 dev_name(data->hwmon_dev));
-		if (IS_ERR(data->alert_thread))
-			data->alert_thread = NULL;
-	}
-}
-
-void pmbus_do_alert(struct i2c_client *client, unsigned int flag)
-{
-	struct pmbus_data *data = i2c_get_clientdata(client);
-
-	mutex_lock(&data->alert_lock);
-	_pmbus_do_alert(client, true);
-	mutex_unlock(&data->alert_lock);
-}
-EXPORT_SYMBOL(pmbus_do_alert);
-
-static int pmbus_alert_thread(void *p)
-{
-	struct i2c_client *client = p;
-	struct pmbus_data *data = i2c_get_clientdata(client);
-
-	mutex_lock(&data->alert_lock);
-	while (!kthread_should_stop() && data->alarm) {
-		_pmbus_do_alert(client, false);
-		if (!data->alarm || kthread_should_stop())
-			break;
-		mutex_unlock(&data->alert_lock);
-		msleep_interruptible(MSEC_PER_SEC);
-		mutex_lock(&data->alert_lock);
-	}
-	data->alert_thread = NULL;
-	complete_all(&data->alert_thread_stop);
-	mutex_unlock(&data->alert_lock);
-	return 0;
-}
-
-int pmbus_do_probe(struct i2c_client *client, const struct i2c_device_id *id,
-		   struct pmbus_driver_info *info)
-{
-	const struct pmbus_platform_data *pdata = client->dev.platform_data;
-	struct pmbus_data *data;
 	int ret;
 
-	if (!info) {
-		dev_err(&client->dev, "Missing chip information");
-		return -ENODEV;
+	/*
+	 * Some PMBus chips don't support PMBUS_STATUS_BYTE, so try
+	 * to use PMBUS_STATUS_WORD instead if that is the case.
+	 * Bail out if both registers are not supported.
+	 */
+	data->status_register = PMBUS_STATUS_BYTE;
+	ret = i2c_smbus_read_byte_data(client, PMBUS_STATUS_BYTE);
+	if (ret < 0 || ret == 0xff) {
+		data->status_register = PMBUS_STATUS_WORD;
+		ret = i2c_smbus_read_word_data(client, PMBUS_STATUS_WORD);
+		if (ret < 0 || ret == 0xffff) {
+			dev_err(&client->dev,
+				"PMBus status register not found\n");
+			return -ENODEV;
+		}
 	}
-
-	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_WRITE_BYTE
-				     | I2C_FUNC_SMBUS_BYTE_DATA
-				     | I2C_FUNC_SMBUS_WORD_DATA))
-		return -ENODEV;
-
-	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
-	if (!data) {
-		dev_err(&client->dev, "No memory to allocate driver data\n");
-		return -ENOMEM;
-	}
-
-	i2c_set_clientdata(client, data);
-	mutex_init(&data->update_lock);
-	mutex_init(&data->alert_lock);
-
-	data->status_register = info->status_register ? : PMBUS_STATUS_BYTE;
-
-	/* Bail out if PMBus status register does not exist. */
-	if (i2c_smbus_read_byte_data(client, data->status_register) < 0) {
-		dev_err(&client->dev, "PMBus status register not found\n");
-		return -ENODEV;
-	}
-
-	if (pdata)
-		data->flags = pdata->flags;
-	data->info = info;
 
 	pmbus_clear_faults(client);
 
@@ -1848,35 +1767,58 @@ int pmbus_do_probe(struct i2c_client *client, const struct i2c_device_id *id,
 		dev_err(&client->dev, "Failed to identify chip capabilities\n");
 		return ret;
 	}
+	return 0;
+}
 
-	ret = -ENOMEM;
+int pmbus_do_probe(struct i2c_client *client, const struct i2c_device_id *id,
+		   struct pmbus_driver_info *info)
+{
+	const struct pmbus_platform_data *pdata = client->dev.platform_data;
+	struct pmbus_data *data;
+	int ret;
+
+	if (!info)
+		return -ENODEV;
+
+	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_WRITE_BYTE
+				     | I2C_FUNC_SMBUS_BYTE_DATA
+				     | I2C_FUNC_SMBUS_WORD_DATA))
+		return -ENODEV;
+
+	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	i2c_set_clientdata(client, data);
+	mutex_init(&data->update_lock);
+
+	if (pdata)
+		data->flags = pdata->flags;
+	data->info = info;
+
+	ret = pmbus_init_common(client, data, info);
+	if (ret < 0)
+		return ret;
+
 	data->sensors = devm_kzalloc(&client->dev, sizeof(struct pmbus_sensor)
 				     * data->max_sensors, GFP_KERNEL);
-	if (!data->sensors) {
-		dev_err(&client->dev, "No memory to allocate sensor data\n");
+	if (!data->sensors)
 		return -ENOMEM;
-	}
 
 	data->booleans = devm_kzalloc(&client->dev, sizeof(struct pmbus_boolean)
 				 * data->max_booleans, GFP_KERNEL);
-	if (!data->booleans) {
-		dev_err(&client->dev, "No memory to allocate boolean data\n");
+	if (!data->booleans)
 		return -ENOMEM;
-	}
 
 	data->labels = devm_kzalloc(&client->dev, sizeof(struct pmbus_label)
 				    * data->max_labels, GFP_KERNEL);
-	if (!data->labels) {
-		dev_err(&client->dev, "No memory to allocate label data\n");
+	if (!data->labels)
 		return -ENOMEM;
-	}
 
 	data->attributes = devm_kzalloc(&client->dev, sizeof(struct attribute *)
 					* data->max_attributes, GFP_KERNEL);
-	if (!data->attributes) {
-		dev_err(&client->dev, "No memory to allocate attribute data\n");
+	if (!data->attributes)
 		return -ENOMEM;
-	}
 
 	pmbus_find_attributes(client, data);
 
@@ -1913,16 +1855,6 @@ EXPORT_SYMBOL_GPL(pmbus_do_probe);
 int pmbus_do_remove(struct i2c_client *client)
 {
 	struct pmbus_data *data = i2c_get_clientdata(client);
-
-	mutex_lock(&data->alert_lock);
-	if (data->alert_thread) {
-		kthread_stop(data->alert_thread);
-		mutex_unlock(&data->alert_lock);
-		wait_for_completion(&data->alert_thread_stop);
-	} else {
-		mutex_unlock(&data->alert_lock);
-	}
-
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&client->dev.kobj, &data->group);
 	return 0;

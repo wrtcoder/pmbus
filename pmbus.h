@@ -2,6 +2,7 @@
  * pmbus.h - Common defines and structures for PMBus devices
  *
  * Copyright (c) 2010, 2011 Ericsson AB.
+ * Copyright (c) 2012 Guenter Roeck
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -177,6 +178,13 @@
 #define PMBUS_VIRT_READ_TEMP2_MAX	(PMBUS_VIRT_BASE + 28)
 #define PMBUS_VIRT_RESET_TEMP2_HISTORY	(PMBUS_VIRT_BASE + 29)
 
+#define PMBUS_VIRT_READ_VMON		(PMBUS_VIRT_BASE + 30)
+#define PMBUS_VIRT_VMON_UV_WARN_LIMIT	(PMBUS_VIRT_BASE + 31)
+#define PMBUS_VIRT_VMON_OV_WARN_LIMIT	(PMBUS_VIRT_BASE + 32)
+#define PMBUS_VIRT_VMON_UV_FAULT_LIMIT	(PMBUS_VIRT_BASE + 33)
+#define PMBUS_VIRT_VMON_OV_FAULT_LIMIT	(PMBUS_VIRT_BASE + 34)
+#define PMBUS_VIRT_STATUS_VMON		(PMBUS_VIRT_BASE + 35)
+
 /*
  * CAPABILITY
  */
@@ -317,6 +325,8 @@ enum pmbus_sensor_classes {
 #define PMBUS_HAVE_STATUS_TEMP	(1 << 15)
 #define PMBUS_HAVE_STATUS_FAN12	(1 << 16)
 #define PMBUS_HAVE_STATUS_FAN34	(1 << 17)
+#define PMBUS_HAVE_VMON		(1 << 18)
+#define PMBUS_HAVE_STATUS_VMON	(1 << 19)
 
 enum pmbus_data_format { linear = 0, direct, vid };
 
@@ -332,7 +342,6 @@ struct pmbus_driver_info {
 	int R[PSC_NUM_CLASSES];	/* exponent */
 
 	u32 func[PMBUS_PAGES];	/* Functionality, per page */
-	u8 status_register;	/* Set if not PMBUS_STATUS_BYTE */
 	/*
 	 * The following functions map manufacturing specific register values
 	 * to PMBus standard register values. Specify only if mapping is
@@ -349,7 +358,6 @@ struct pmbus_driver_info {
 	int (*write_word_data)(struct i2c_client *client, int page, int reg,
 			       u16 word);
 	int (*write_byte)(struct i2c_client *client, int page, u8 value);
-	void (*alert_handler)(struct i2c_client *client, bool alarm);
 	/*
 	 * The identify function determines supported PMBus functionality.
 	 * This function is only necessary if a chip driver supports multiple
@@ -369,7 +377,6 @@ int pmbus_write_byte(struct i2c_client *client, int page, u8 value);
 void pmbus_clear_faults(struct i2c_client *client);
 bool pmbus_check_byte_register(struct i2c_client *client, int page, int reg);
 bool pmbus_check_word_register(struct i2c_client *client, int page, int reg);
-void pmbus_do_alert(struct i2c_client *client, unsigned int flag);
 int pmbus_do_probe(struct i2c_client *client, const struct i2c_device_id *id,
 		   struct pmbus_driver_info *info);
 int pmbus_do_remove(struct i2c_client *client);

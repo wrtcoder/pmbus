@@ -36,17 +36,6 @@ enum chips { adm1075, adm1275, adm1276 };
 #define ADM1075_IRANGE_25		(1 << 3)
 #define ADM1075_IRANGE_MASK		((1 << 3) | (1 << 4))
 
-#define ADM1275_ALERT1_CONFIG		0xd5
-#define ADM1275_ALERT2_CONFIG		0xd6
-
-#define ADM1275_CONVERT_EN		(1 << 2)		
-#define ADM1275_GPO_EN			(1 << 1)		
-#define ADM1275_GPO_DATA		(1 << 0)		
-#define ADM1275_SMBALERT_MASK		(ADM1275_CONVERT_EN | ADM1275_GPO_EN \
-					 | ADM1275_GPO_DATA)
-#define ADM1275_ALERT_MASK		0xf81f	/* hw-generated alarms and
-						   configuration bits */
-
 #define ADM1275_IOUT_WARN2_LIMIT	0xd7
 #define ADM1275_DEVICE_CONFIG		0xd8
 
@@ -67,8 +56,6 @@ enum chips { adm1075, adm1275, adm1276 };
 struct adm1275_data {
 	int id;
 	bool have_oc_fault;
-	u16 alert1, alert2;
-	u16 alert1_curr, alert2_curr;
 	struct pmbus_driver_info info;
 };
 
@@ -230,65 +217,6 @@ static int adm1275_read_byte_data(struct i2c_client *client, int page, int reg)
 	return ret;
 }
 
-/*
- * ADM1275 and ADM1276 keep generating SMBUS alerts for software-implemented
- * alarms, even if there is no change in alarm status. This causes a lot of I2C
- * bus traffic as well as "Duplicate alert" kernel log warnings.
- * Since this is undesirable, disable generation of SMBus alerts for the
- * affected alarm bits while any of the alarms is active. Re-enable SMBus alarm
- * notifications if no further alarms are pending.
- * This means that after the first warning alarm bit is set, subsequent alarm
- * bits are only detected by the PMBus core polling function, which may result
- * in slight reporting delays (up to 1 second) if another alarm is activated.
- * This may not be optimal, but is still better than the overhead of having to
- * handle continuous SMBus interrupts.
- */
-static void adm1275_alert_handler(struct i2c_client *client, bool alarm)
-{
-	const struct pmbus_driver_info *info = pmbus_get_driver_info(client);
-	struct adm1275_data *data = to_adm1275_data(info);
-	int reg;
-
-	if (data->id == adm1275 && (data->alert1 & ADM1275_SMBALERT_MASK) == 0) {
-		reg = data->alert1_curr;
-		if (alarm) {
-			reg &= ADM1275_ALERT_MASK;
-			if (reg != data->alert1_curr) {
-				i2c_smbus_write_word_data(client,
-							  ADM1275_ALERT1_CONFIG,
-							  reg);
-				data->alert1_curr = reg;
-			}
-		} else {
-			if (reg != data->alert1) {
-				i2c_smbus_write_word_data(client,
-							  ADM1275_ALERT1_CONFIG,
-							  data->alert1);
-				data->alert1_curr = data->alert1;
-			}
-		}
-	}
-	if ((data->alert2 & ADM1275_SMBALERT_MASK) == 0) {
-		reg = data->alert2_curr;
-		if (alarm) {
-			reg &= ADM1275_ALERT_MASK;
-			if (reg != data->alert2_curr) {
-				i2c_smbus_write_word_data(client,
-							  ADM1275_ALERT2_CONFIG,
-							  reg);
-				data->alert2_curr = reg;
-			}
-		} else {
-			if (reg != data->alert2) {
-				i2c_smbus_write_word_data(client,
-							  ADM1275_ALERT2_CONFIG,
-							  data->alert2);
-				data->alert2_curr = data->alert2;
-			}
-		}
-	}
-}
-
 static const struct i2c_device_id adm1275_id[] = {
 	{ "adm1075", adm1075 },
 	{ "adm1275", adm1275 },
@@ -309,14 +237,8 @@ static int adm1275_probe(struct i2c_client *client,
 
 	if (!i2c_check_functionality(client->adapter,
 				     I2C_FUNC_SMBUS_READ_BYTE_DATA
-				     | I2C_FUNC_SMBUS_READ_WORD_DATA
 				     | I2C_FUNC_SMBUS_BLOCK_DATA))
 		return -ENODEV;
-
-	data = devm_kzalloc(&client->dev, sizeof(struct adm1275_data),
-			    GFP_KERNEL);
-	if (!data)
-		return -ENOMEM;
 
 	ret = i2c_smbus_read_block_data(client, PMBUS_MFR_ID, block_buffer);
 	if (ret < 0) {
@@ -355,19 +277,12 @@ static int adm1275_probe(struct i2c_client *client,
 	if (device_config < 0)
 		return device_config;
 
-	data->id = mid->driver_data;
-	if (data->id == adm1275) {
-		data->alert1 = i2c_smbus_read_word_data(client,
-							ADM1275_ALERT1_CONFIG);
-		if (data->alert1 < 0)
-			return data->alert1;
-		data->alert1_curr = data->alert1;
-	}
+	data = devm_kzalloc(&client->dev, sizeof(struct adm1275_data),
+			    GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
 
-	data->alert2 = i2c_smbus_read_word_data(client, ADM1275_ALERT2_CONFIG);
-	if (data->alert2 < 0)
-		return data->alert2;
-	data->alert2_curr = data->alert2;
+	data->id = mid->driver_data;
 
 	info = &data->info;
 
@@ -383,7 +298,6 @@ static int adm1275_probe(struct i2c_client *client,
 	info->read_word_data = adm1275_read_word_data;
 	info->read_byte_data = adm1275_read_byte_data;
 	info->write_word_data = adm1275_write_word_data;
-	info->alert_handler = adm1275_alert_handler;
 
 	if (data->id == adm1075) {
 		info->m[PSC_VOLTAGE_IN] = 27169;
@@ -467,36 +381,17 @@ static int adm1275_probe(struct i2c_client *client,
 	return pmbus_do_probe(client, id, info);
 }
 
-static int adm1275_remove(struct i2c_client *client)
-{
-	pmbus_do_remove(client);
-	return 0;
-}
-
 static struct i2c_driver adm1275_driver = {
 	.driver = {
 		   .name = "adm1275",
 		   },
 	.probe = adm1275_probe,
-	.remove = adm1275_remove,
-#if defined(CONFIG_I2C_SMBUS) || defined(CONFIG_I2C_PMBUS_MODULE)
-	.alert = pmbus_do_alert,
-#endif
+	.remove = pmbus_do_remove,
 	.id_table = adm1275_id,
 };
 
-static int __init adm1275_init(void)
-{
-	return i2c_add_driver(&adm1275_driver);
-}
-
-static void __exit adm1275_exit(void)
-{
-	i2c_del_driver(&adm1275_driver);
-}
+module_i2c_driver(adm1275_driver);
 
 MODULE_AUTHOR("Guenter Roeck");
 MODULE_DESCRIPTION("PMBus driver for Analog Devices ADM1275 and compatibles");
 MODULE_LICENSE("GPL");
-module_init(adm1275_init);
-module_exit(adm1275_exit);

@@ -368,24 +368,11 @@ static struct i2c_driver ltc2978_driver = {
 		   },
 	.probe = ltc2978_probe,
 	.remove = pmbus_do_remove,
-#if defined(CONFIG_I2C_SMBUS) || defined(CONFIG_I2C_PMBUS_MODULE)
-	.alert = pmbus_do_alert,
-#endif
 	.id_table = ltc2978_id,
 };
 
-static int __init ltc2978_init(void)
-{
-	return i2c_add_driver(&ltc2978_driver);
-}
-
-static void __exit ltc2978_exit(void)
-{
-	i2c_del_driver(&ltc2978_driver);
-}
+module_i2c_driver(ltc2978_driver);
 
 MODULE_AUTHOR("Guenter Roeck");
 MODULE_DESCRIPTION("PMBus driver for LTC2978 and LTC3880");
 MODULE_LICENSE("GPL");
-module_init(ltc2978_init);
-module_exit(ltc2978_exit);

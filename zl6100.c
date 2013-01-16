@@ -2,6 +2,7 @@
  * Hardware monitoring driver for ZL6100 and compatibles
  *
  * Copyright (c) 2011 Ericsson AB.
+ * Copyright (c) 2012 Guenter Roeck
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -56,8 +57,6 @@ struct zl6100_data {
 
 #define ZL6100_WAIT_TIME		1000	/* uS	*/
 
-#define ZL6100_VOUT_EXPONENT		-13
-
 static ushort delay = ZL6100_WAIT_TIME;
 module_param(delay, ushort, 0644);
 MODULE_PARM_DESC(delay, "Delay between chip accesses in uS");
@@ -72,37 +71,13 @@ static inline void zl6100_wait(const struct zl6100_data *data)
 	}
 }
 
-static int zl6100_lin11_to_lin16(int reg)
-{
-	int mantissa = ((s16)((reg & 0x7ff) << 5)) >> 5;
-	int shift = ZL6100_VOUT_EXPONENT - (((s16)reg) >> 11);
-
-	if (shift < 0)
-		mantissa <<= -shift;
-	else if (shift)
-		mantissa >>= shift;
-
-	return mantissa & 0xffff;
-}
-
-static u16 zl6100_lin16_to_lin11(u16 reg)
-{
-	int exp = ZL6100_VOUT_EXPONENT;
-
-	while (reg > 0x3ff) {
-		exp++;
-		reg >>= 1;
-	}
-	return reg | (exp << 11);
-}
-
 static int zl6100_read_word_data(struct i2c_client *client, int page, int reg)
 {
 	const struct pmbus_driver_info *info = pmbus_get_driver_info(client);
 	struct zl6100_data *data = to_zl6100_data(info);
 	int ret;
 
-	if (page > info->pages || reg >= PMBUS_VIRT_BASE)
+	if (page > 0)
 		return -ENXIO;
 
 	if (data->id == zl2005) {
@@ -118,31 +93,26 @@ static int zl6100_read_word_data(struct i2c_client *client, int page, int reg)
 		}
 	}
 
-	zl6100_wait(data);
-
-	if (page == 1) {
-		page = 0;
-		switch (reg) {
-		case PMBUS_READ_VOUT:
-			reg = MFR_READ_VMON;
-			break;
-		case PMBUS_VOUT_OV_FAULT_LIMIT:
-			reg = MFR_VMON_OV_FAULT_LIMIT;
-			break;
-		case PMBUS_VOUT_UV_FAULT_LIMIT:
-			reg = MFR_VMON_UV_FAULT_LIMIT;
-			break;
-		default:
-			/* No other valid registers on page 1 */
+	switch (reg) {
+	case PMBUS_VIRT_READ_VMON:
+		reg = MFR_READ_VMON;
+		break;
+	case PMBUS_VIRT_VMON_OV_FAULT_LIMIT:
+		reg = MFR_VMON_OV_FAULT_LIMIT;
+		break;
+	case PMBUS_VIRT_VMON_UV_FAULT_LIMIT:
+		reg = MFR_VMON_UV_FAULT_LIMIT;
+		break;
+	default:
+		if (reg >= PMBUS_VIRT_BASE)
 			return -ENXIO;
-		}
-		ret = pmbus_read_word_data(client, page, reg);
-		if (ret > 0)
-			ret = zl6100_lin11_to_lin16(ret);
-	} else {
-		ret = pmbus_read_word_data(client, page, reg);
+		break;
 	}
+
+	zl6100_wait(data);
+	ret = pmbus_read_word_data(client, page, reg);
 	data->access = ktime_get();
+
 	return ret;
 }
 
@@ -152,38 +122,35 @@ static int zl6100_read_byte_data(struct i2c_client *client, int page, int reg)
 	struct zl6100_data *data = to_zl6100_data(info);
 	int ret, status;
 
-	if (page > info->pages)
+	if (page > 0)
 		return -ENXIO;
 
 	zl6100_wait(data);
 
-	if (page == 1) {
-		switch (reg) {
-		case PMBUS_STATUS_VOUT:
-			ret = pmbus_read_byte_data(client, 0,
-						   PMBUS_STATUS_MFR_SPECIFIC);
-			if (ret < 0)
-				break;
-
-			status = 0;
-			if (ret & VMON_UV_WARNING)
-				status |= PB_VOLTAGE_UV_WARNING;
-			if (ret & VMON_OV_WARNING)
-				status |= PB_VOLTAGE_OV_WARNING;
-			if (ret & VMON_UV_FAULT)
-				status |= PB_VOLTAGE_UV_FAULT;
-			if (ret & VMON_OV_FAULT)
-				status |= PB_VOLTAGE_OV_FAULT;
-			ret = status;
+	switch (reg) {
+	case PMBUS_VIRT_STATUS_VMON:
+		ret = pmbus_read_byte_data(client, 0,
+					   PMBUS_STATUS_MFR_SPECIFIC);
+		if (ret < 0)
 			break;
-		default:
-			/* No other valid registers on page 1 */
-			return -ENXIO;
-		}
-	} else {
+
+		status = 0;
+		if (ret & VMON_UV_WARNING)
+			status |= PB_VOLTAGE_UV_WARNING;
+		if (ret & VMON_OV_WARNING)
+			status |= PB_VOLTAGE_OV_WARNING;
+		if (ret & VMON_UV_FAULT)
+			status |= PB_VOLTAGE_UV_FAULT;
+		if (ret & VMON_OV_FAULT)
+			status |= PB_VOLTAGE_OV_FAULT;
+		ret = status;
+		break;
+	default:
 		ret = pmbus_read_byte_data(client, page, reg);
+		break;
 	}
 	data->access = ktime_get();
+
 	return ret;
 }
 
@@ -194,23 +161,19 @@ static int zl6100_write_word_data(struct i2c_client *client, int page, int reg,
 	struct zl6100_data *data = to_zl6100_data(info);
 	int ret;
 
-	if (page > info->pages || reg >= PMBUS_VIRT_BASE)
+	if (page > 0)
 		return -ENXIO;
 
-	if (page == 1) {
-		page = 0;
-		switch (reg) {
-		case PMBUS_VOUT_OV_FAULT_LIMIT:
-			reg = MFR_VMON_OV_FAULT_LIMIT;
-			break;
-		case PMBUS_VOUT_UV_FAULT_LIMIT:
-			reg = MFR_VMON_UV_FAULT_LIMIT;
-			break;
-		default:
-			/* No other valid registers on page 1 */
+	switch (reg) {
+	case PMBUS_VIRT_VMON_OV_FAULT_LIMIT:
+		reg = MFR_VMON_OV_FAULT_LIMIT;
+		break;
+	case PMBUS_VIRT_VMON_UV_FAULT_LIMIT:
+		reg = MFR_VMON_UV_FAULT_LIMIT;
+		break;
+	default:
+		if (reg >= PMBUS_VIRT_BASE)
 			return -ENXIO;
-		}
-		word = zl6100_lin16_to_lin11(word);
 	}
 
 	zl6100_wait(data);
@@ -224,16 +187,14 @@ static int zl6100_write_byte(struct i2c_client *client, int page, u8 value)
 {
 	const struct pmbus_driver_info *info = pmbus_get_driver_info(client);
 	struct zl6100_data *data = to_zl6100_data(info);
-	int ret = 0;
+	int ret;
 
-	if (page > info->pages)
+	if (page > 0)
 		return -ENXIO;
 
-	if (page <= 0) {
-		zl6100_wait(data);
-		ret = pmbus_write_byte(client, page, value);
-		data->access = ktime_get();
-	}
+	zl6100_wait(data);
+	ret = pmbus_write_byte(client, page, value);
+	data->access = ktime_get();
 
 	return ret;
 }
@@ -303,17 +264,11 @@ static int zl6100_probe(struct i2c_client *client,
 	data->id = mid->driver_data;
 
 	/*
-	 * ZL2005, ZL2008, ZL2105, ZL6100, ZL9101M, and ZL9117M are known to
-	 * require a wait time between I2C accesses. ZL2004 and ZL6105 are known
-	 * to be safe. Other chips have not yet been tested.
-	 *
-	 * Only clear the wait time for chips known to be safe. The wait time
-	 * can be cleared later for additional chips if tests show that it
-	 * is not needed (in other words, better be safe than sorry).
+	 * According to information from the chip vendor, all currently
+	 * supported chips are known to require a wait time between I2C
+	 * accesses.
 	 */
 	data->delay = delay;
-	if (data->id == zl2004 || data->id == zl6105)
-		data->delay = 0;
 
 	/*
 	 * Since there was a direct I2C device access above, wait before
@@ -332,13 +287,10 @@ static int zl6100_probe(struct i2c_client *client,
 
 	/*
 	 * ZL2004, ZL9101M, and ZL9117M support monitoring an extra voltage
-	 * (VMON for ZL2004, VDRV for ZL9101M and ZL9117M). Report it as output
-	 * voltage on the second page (vout2).
+	 * (VMON for ZL2004, VDRV for ZL9101M and ZL9117M). Report it as vmon.
 	 */
-	if (data->id == zl2004 || data->id == zl9101 || data->id == zl9117) {
-		info->pages = 2;
-		info->func[1] = PMBUS_HAVE_VOUT | PMBUS_HAVE_STATUS_VOUT;
-	}
+	if (data->id == zl2004 || data->id == zl9101 || data->id == zl9117)
+		info->func[0] |= PMBUS_HAVE_VMON | PMBUS_HAVE_STATUS_VMON;
 
 	ret = i2c_smbus_read_word_data(client, ZL6100_MFR_CONFIG);
 	if (ret < 0)
@@ -367,18 +319,8 @@ static struct i2c_driver zl6100_driver = {
 	.id_table = zl6100_id,
 };
 
-static int __init zl6100_init(void)
-{
-	return i2c_add_driver(&zl6100_driver);
-}
-
-static void __exit zl6100_exit(void)
-{
-	i2c_del_driver(&zl6100_driver);
-}
+module_i2c_driver(zl6100_driver);
 
 MODULE_AUTHOR("Guenter Roeck");
 MODULE_DESCRIPTION("PMBus driver for ZL6100 and compatibles");
 MODULE_LICENSE("GPL");
-module_init(zl6100_init);
-module_exit(zl6100_exit);
