@@ -97,6 +97,7 @@ struct pmbus_data {
 	int max_attributes;
 	int num_attributes;
 	struct attribute_group group;
+	const struct attribute_group *groups[2];
 
 	struct pmbus_sensor *sensors;
 
@@ -156,7 +157,7 @@ EXPORT_SYMBOL_GPL(pmbus_write_byte);
 
 /*
  * _pmbus_write_byte() is similar to pmbus_write_byte(), but checks if
- * a device specific mapping funcion exists and calls it if necessary.
+ * a device specific mapping function exists and calls it if necessary.
  */
 static int _pmbus_write_byte(struct i2c_client *client, int page, u8 value)
 {
@@ -348,7 +349,7 @@ static struct _pmbus_status {
 
 static struct pmbus_data *pmbus_update_device(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
+	struct i2c_client *client = to_i2c_client(dev->parent);
 	struct pmbus_data *data = i2c_get_clientdata(client);
 	const struct pmbus_driver_info *info = data->info;
 	struct pmbus_sensor *sensor;
@@ -686,7 +687,7 @@ static int pmbus_get_boolean(struct pmbus_data *data, struct pmbus_boolean *b,
 	if (!s1 && !s2) {
 		ret = !!regval;
 	} else if (!s1 || !s2) {
-		BUG();
+		WARN(1, "Bad boolean descriptor %p: s1=%p, s2=%p\n", b, s1, s2);
 		return 0;
 	} else {
 		long v1, v2;
@@ -733,7 +734,7 @@ static ssize_t pmbus_set_sensor(struct device *dev,
 				struct device_attribute *devattr,
 				const char *buf, size_t count)
 {
-	struct i2c_client *client = to_i2c_client(dev);
+	struct i2c_client *client = to_i2c_client(dev->parent);
 	struct pmbus_data *data = i2c_get_clientdata(client);
 	struct pmbus_sensor *sensor = to_pmbus_sensor(devattr);
 	ssize_t rv = count;
@@ -766,12 +767,14 @@ static ssize_t pmbus_show_label(struct device *dev,
 static int pmbus_add_attribute(struct pmbus_data *data, struct attribute *attr)
 {
 	if (data->num_attributes >= data->max_attributes - 1) {
-		data->max_attributes += PMBUS_ATTR_ALLOC_SIZE;
-		data->group.attrs = krealloc(data->group.attrs,
-					     sizeof(struct attribute *) *
-					     data->max_attributes, GFP_KERNEL);
-		if (data->group.attrs == NULL)
+		int new_max_attrs = data->max_attributes + PMBUS_ATTR_ALLOC_SIZE;
+		void *new_attrs = krealloc(data->group.attrs,
+					   new_max_attrs * sizeof(void *),
+					   GFP_KERNEL);
+		if (!new_attrs)
 			return -ENOMEM;
+		data->group.attrs = new_attrs;
+		data->max_attributes = new_max_attrs;
 	}
 
 	data->group.attrs[data->num_attributes++] = attr;
@@ -1724,7 +1727,7 @@ int pmbus_do_probe(struct i2c_client *client, const struct i2c_device_id *id,
 		   struct pmbus_driver_info *info)
 {
 	struct device *dev = &client->dev;
-	const struct pmbus_platform_data *pdata = dev->platform_data;
+	const struct pmbus_platform_data *pdata = dev_get_platdata(dev);
 	struct pmbus_data *data;
 	int ret;
 
@@ -1766,22 +1769,16 @@ int pmbus_do_probe(struct i2c_client *client, const struct i2c_device_id *id,
 		goto out_kfree;
 	}
 
-	/* Register sysfs hooks */
-	ret = sysfs_create_group(&dev->kobj, &data->group);
-	if (ret) {
-		dev_err(dev, "Failed to create sysfs entries\n");
-		goto out_kfree;
-	}
-	data->hwmon_dev = hwmon_device_register(dev);
+	data->groups[0] = &data->group;
+	data->hwmon_dev = hwmon_device_register_with_groups(dev, client->name,
+							    data, data->groups);
 	if (IS_ERR(data->hwmon_dev)) {
 		ret = PTR_ERR(data->hwmon_dev);
 		dev_err(dev, "Failed to register hwmon device\n");
-		goto out_hwmon_device_register;
+		goto out_kfree;
 	}
 	return 0;
 
-out_hwmon_device_register:
-	sysfs_remove_group(&dev->kobj, &data->group);
 out_kfree:
 	kfree(data->group.attrs);
 	return ret;
@@ -1792,7 +1789,6 @@ int pmbus_do_remove(struct i2c_client *client)
 {
 	struct pmbus_data *data = i2c_get_clientdata(client);
 	hwmon_device_unregister(data->hwmon_dev);
-	sysfs_remove_group(&client->dev.kobj, &data->group);
 	kfree(data->group.attrs);
 	return 0;
 }
